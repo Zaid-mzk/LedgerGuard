@@ -1,0 +1,35 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+.venv/
+**/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend build
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+
+# Local databases and generated ML artifacts
+*.sqlite3
+*.db
+backend/artifacts/*.joblib
+backend/artifacts/*.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
