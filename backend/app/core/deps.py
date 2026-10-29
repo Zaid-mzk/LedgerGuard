@@ -80,3 +80,18 @@ def roles(*allowed):
         return user
 
     return check
+
+
+def operational_roles(*allowed):
+    def check(user: User = Depends(current_user)):
+        if user.role == "recruiter" or user.role not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Your role cannot perform this action",
+                },
+            )
+        return user
+
+    return check

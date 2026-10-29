@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
+import secrets
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
@@ -17,8 +18,8 @@ from app.models.entities import (
     RiskFlag,
 )
 from app.schemas.api import LoginIn, TransferIn, ReviewIn
-from app.core.security import verify_password, create_token
-from app.core.deps import current_user, roles
+from app.core.security import verify_password, create_token, hash_password
+from app.core.deps import current_user, roles, operational_roles
 from app.services.transfers import create_transfer
 from app.services.audit import audit
 from fastapi import Response
@@ -121,6 +122,71 @@ def logout(response: Response):
 @router.get("/auth/me")
 def me(user: User = Depends(current_user)):
     return {"id": user.id, "email": user.email, "role": user.role}
+
+
+@router.post("/auth/recruiter-demo")
+def recruiter_demo_login(
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    if not settings.recruiter_demo_enabled:
+        raise HTTPException(
+            status_code=404,
+            detail="Recruiter demo is not enabled",
+        )
+
+    email = "demo.recruiter@ledgerguard.local"
+    user = db.scalar(select(User).where(User.email == email))
+
+    if user is None:
+        user = User(
+            email=email,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            role="recruiter",
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    if not user.is_active or user.role != "recruiter":
+        raise HTTPException(
+            status_code=403,
+            detail="Recruiter demo account is unavailable",
+        )
+
+    access_token = create_token(user.id, expires_minutes=15)
+
+    response.set_cookie(
+        key="lg_access_token",
+        value=access_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=15 * 60,
+    )
+
+    audit(
+        db,
+        user.id,
+        "auth.recruiter_demo_login",
+        "user",
+        user.id,
+        {"role": "recruiter"},
+    )
+    db.commit()
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role,
+        },
+    }
+
 
 
 @router.get("/metrics/summary")
@@ -241,6 +307,14 @@ def post_transfer(
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
+    if user.role == "recruiter":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Recruiter demo is read-only",
+            },
+        )
     transfer, replayed = create_transfer(db, user, data, idempotency_key)
     return {**transfer_out(transfer), "idempotency_replay": replayed}
 
@@ -289,7 +363,7 @@ def reverse_transfer(
     transfer_id: str,
     idempotency_key: str = Header(alias="Idempotency-Key"),
     db: Session = Depends(get_db),
-    user: User = Depends(roles("admin", "analyst")),
+    user: User = Depends(operational_roles("admin", "analyst")),
 ):
     if not 8 <= len(idempotency_key) <= 128 or not all(
         c.isalnum() or c in "-_.:" for c in idempotency_key
@@ -430,7 +504,7 @@ def ledger(db: Session = Depends(get_db), user: User = Depends(current_user)):
 
 
 @router.get("/audit")
-def audit_log(db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst"))):
+def audit_log(db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst", "recruiter"))):
     rows = db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(200)).all()
     return [
         {
@@ -449,7 +523,7 @@ def audit_log(db: Session = Depends(get_db), user: User = Depends(roles("admin",
 @router.post("/reconciliation/simulate-provider-batch")
 def simulate_batch(
     db: Session = Depends(get_db),
-    user: User = Depends(roles("admin")),
+    user: User = Depends(operational_roles("admin")),
 ):
     transfers = db.scalars(
         select(Transfer)
@@ -517,7 +591,7 @@ def simulate_batch(
 @router.post("/reconciliation/run")
 def run_reconciliation(
     db: Session = Depends(get_db),
-    user: User = Depends(roles("admin", "analyst")),
+    user: User = Depends(operational_roles("admin", "analyst")),
 ):
     transfers = db.scalars(select(Transfer).where(Transfer.status == "completed")).all()
     transfers_by_id = {t.id: t for t in transfers}
@@ -652,7 +726,7 @@ def run_reconciliation(
 
 @router.get("/reconciliation/runs")
 def reconciliation_runs(
-    db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst"))
+    db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst", "recruiter"))
 ):
     rows = db.scalars(
         select(ReconciliationRun).order_by(ReconciliationRun.started_at.desc()).limit(100)
@@ -671,7 +745,7 @@ def reconciliation_runs(
 
 @router.get("/reconciliation/runs/{run_id}")
 def reconciliation_run_detail(
-    run_id: str, db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst"))
+    run_id: str, db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst", "recruiter"))
 ):
     r = db.get(ReconciliationRun, run_id)
     if not r:
@@ -690,7 +764,7 @@ def reconciliation_run_detail(
 @router.get("/reconciliation/discrepancies")
 def discrepancies(
     db: Session = Depends(get_db),
-    user: User = Depends(roles("admin", "analyst")),
+    user: User = Depends(roles("admin", "analyst", "recruiter")),
 ):
     latest_run_id = db.scalar(
         select(ReconciliationRun.id)
@@ -734,7 +808,7 @@ def review_discrepancy(
     item_id: str,
     data: ReviewIn,
     db: Session = Depends(get_db),
-    user: User = Depends(roles("admin", "analyst")),
+    user: User = Depends(operational_roles("admin", "analyst")),
 ):
     d = db.get(ReconciliationDiscrepancy, item_id)
     if not d:
@@ -754,7 +828,7 @@ def review_discrepancy(
 
 
 @router.post("/risk/analyze")
-def analyze_risk(db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst"))):
+def analyze_risk(db: Session = Depends(get_db), user: User = Depends(operational_roles("admin", "analyst"))):
     ts = db.scalars(
         select(Transfer)
         .where(Transfer.status == "completed")
@@ -804,7 +878,7 @@ def analyze_risk(db: Session = Depends(get_db), user: User = Depends(roles("admi
 
 
 @router.get("/risk/flags")
-def risk_flags(db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst"))):
+def risk_flags(db: Session = Depends(get_db), user: User = Depends(roles("admin", "analyst", "recruiter"))):
     rows = db.scalars(select(RiskFlag).order_by(RiskFlag.created_at.desc()).limit(200)).all()
     return [
         {
@@ -826,7 +900,7 @@ def review_flag(
     item_id: str,
     data: ReviewIn,
     db: Session = Depends(get_db),
-    user: User = Depends(roles("admin", "analyst")),
+    user: User = Depends(operational_roles("admin", "analyst")),
 ):
     if data.status not in {"reviewed", "dismissed"}:
         raise HTTPException(

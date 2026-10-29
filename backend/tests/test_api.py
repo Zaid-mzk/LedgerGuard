@@ -579,3 +579,127 @@ def test_discrepancy_review_is_audited(client):
         and event["entity_id"] == item["id"]
         for event in audit_response.json()
     )
+
+def test_recruiter_demo_is_read_only(client, monkeypatch):
+    from app.core.config import settings
+
+    # Enable recruiter login only for this test.
+    monkeypatch.setattr(settings, "recruiter_demo_enabled", True)
+
+    # Create a real transfer as admin so reversal can be tested.
+    admin_token = login(client)
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    accounts = client.get(
+        "/api/v1/accounts", headers=admin_headers
+    ).json()
+
+    sender = next(a for a in accounts if a["display_name"] == "Admin")
+    receiver = next(a for a in accounts if a["display_name"] == "Customer")
+
+    transfer_response = client.post(
+        "/api/v1/transfers",
+        headers={
+            **admin_headers,
+            "Idempotency-Key": "recruiter-read-only-setup",
+        },
+        json={
+            "sender_account_id": sender["id"],
+            "receiver_account_id": receiver["id"],
+            "amount": "10.00",
+            "currency": "INR",
+            "description": "Recruiter security test setup",
+        },
+    )
+    assert transfer_response.status_code == 200, transfer_response.text
+    transfer_id = transfer_response.json()["id"]
+
+    # Log in as the dedicated recruiter.
+    response = client.post("/api/v1/auth/recruiter-demo")
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["role"] == "recruiter"
+
+    recruiter_headers = {
+        "Authorization": f"Bearer {response.json()['access_token']}"
+    }
+
+    # Recruiter can view permitted synthetic data.
+    for path in (
+        "/api/v1/metrics/summary",
+        "/api/v1/accounts",
+        "/api/v1/transfers",
+        "/api/v1/ledger",
+        "/api/v1/audit",
+        "/api/v1/reconciliation/runs",
+        "/api/v1/reconciliation/discrepancies",
+        "/api/v1/risk/flags",
+    ):
+        result = client.get(path, headers=recruiter_headers)
+        assert result.status_code == 200, f"{path}: {result.status_code} {result.text}"
+
+    # Direct API write attempts must be rejected.
+    create_transfer = client.post(
+        "/api/v1/transfers",
+        headers={
+            **recruiter_headers,
+            "Idempotency-Key": "recruiter-must-not-transfer",
+        },
+        json={
+            "sender_account_id": sender["id"],
+            "receiver_account_id": receiver["id"],
+            "amount": "5.00",
+            "currency": "INR",
+            "description": "Must be rejected",
+        },
+    )
+    assert create_transfer.status_code == 403, create_transfer.text
+
+    reverse_transfer = client.post(
+        f"/api/v1/transfers/{transfer_id}/reverse",
+        headers={
+            **recruiter_headers,
+            "Idempotency-Key": "recruiter-must-not-reverse",
+        },
+    )
+    assert reverse_transfer.status_code == 403, reverse_transfer.text
+
+    write_requests = [
+        (
+            "POST",
+            "/api/v1/reconciliation/simulate-provider-batch",
+            None,
+        ),
+        ("POST", "/api/v1/reconciliation/run", None),
+        ("POST", "/api/v1/risk/analyze", None),
+        (
+            "PATCH",
+            "/api/v1/reconciliation/discrepancies/"
+            "00000000-0000-0000-0000-000000000000",
+            {"status": "reviewed"},
+        ),
+        (
+            "PATCH",
+            "/api/v1/risk/flags/00000000-0000-0000-0000-000000000000",
+            {"status": "reviewed"},
+        ),
+    ]
+
+    for method, path, body in write_requests:
+        result = client.request(
+            method,
+            path,
+            headers=recruiter_headers,
+            json=body,
+        )
+        assert result.status_code == 403, (
+            f"{method} {path}: expected 403, got "
+            f"{result.status_code}: {result.text}"
+        )
+
+
+def test_recruiter_demo_disabled_by_default(client, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "recruiter_demo_enabled", False)
+
+    response = client.post("/api/v1/auth/recruiter-demo")
+    assert response.status_code == 404

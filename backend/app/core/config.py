@@ -9,6 +9,6 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     seed_demo_data: bool = False
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
+    recruiter_demo_enabled: bool = False
 
 settings = Settings()
