@@ -85,15 +85,17 @@ def login(
     audit(db, user.id, "auth.login_success", "user", user.id)
     db.commit()
 
+    
     response.set_cookie(
         key="lg_access_token",
         value=token,
         httponly=True,
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
-        samesite="lax",
+        secure=True,
+        samesite="none",
         max_age=settings.jwt_access_token_minutes * 60,
         path="/",
     )
+
 
     return {
         "access_token": token,
@@ -112,9 +114,10 @@ def logout(response: Response):
         key="lg_access_token",
         path="/",
         httponly=True,
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
-        samesite="lax",
+        secure=True,
+        samesite="none",
     )
+
     return {"message": "Signed out"}
 
 
