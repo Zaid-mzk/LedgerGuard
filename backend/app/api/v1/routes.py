@@ -21,7 +21,6 @@ from app.core.security import verify_password, create_token
 from app.core.deps import current_user, roles
 from app.services.transfers import create_transfer
 from app.services.audit import audit
-import os
 from fastapi import Response
 from app.core.config import settings
 
@@ -85,7 +84,6 @@ def login(
     audit(db, user.id, "auth.login_success", "user", user.id)
     db.commit()
 
-    
     response.set_cookie(
         key="lg_access_token",
         value=token,
@@ -95,7 +93,6 @@ def login(
         max_age=settings.jwt_access_token_minutes * 60,
         path="/",
     )
-
 
     return {
         "access_token": token,
